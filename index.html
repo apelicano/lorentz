@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Lorentz Aim Trainer — Proton/Positron Beam Visualizer</title>
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin: 0; display:flex; height:100vh; }
+    #ui { width:360px; padding:16px; box-sizing:border-box; border-right:1px solid #eee; background:#fafafa; }
+    #canvasWrap { flex:1; display:flex; align-items:center; justify-content:center; background:linear-gradient(180deg,#f8fbff,#eef6ff); }
+    canvas { background: #fff; box-shadow:0 6px 18px rgba(20,40,80,0.08); border-radius:8px; }
+    label { display:block; margin-top:12px; font-size:13px; color:#222; }
+    .row { display:flex; gap:8px; align-items:center; }
+    input[type=range] { width:100%; }
+    .small { font-size:12px; color:#555; }
+    button { margin-top:12px; padding:8px 10px; border-radius:6px; border:1px solid #cfd8e3; background:#f6f9ff; cursor:pointer; }
+    .status { margin-top:10px; padding:8px; background:#fff; border-radius:6px; box-shadow:0 1px 0 rgba(0,0,0,0.03); font-size:13px; }
+    .control-row { display:flex; gap:8px; align-items:center; }
+    select { padding:6px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <h3>Lorentz Aim Trainer</h3>
+    <p class="small">Simulate a positively-charged beam (positron/proton) leaving Egon's location and curving under a uniform B-field. Aim with θ to hit the target (ghost).</p>
+
+    <label>Particle
+      <select id="particle">
+        <option value="positron">Positron (e+)</option>
+        <option value="proton">Proton (p+)</option>
+      </select>
+    </label>
+
+    <label>Initial speed v (units m/s, normalized)
+      <input type="range" id="v" min="1" max="30" value="12">
+      <div class="row"><div id="vVal">12</div><div class="small">(affects curvature radius)</div></div>
+    </label>
+
+    <label>Exit angle θ (degrees)
+      <input type="range" id="theta" min="-89" max="89" value="10">
+      <div class="row"><div id="thetaVal">10°</div></div>
+    </label>
+
+    <label>B-field (Tesla). Sign = direction: + = out-of-plane, - = into-plane
+      <input type="range" id="B" min="-10" max="10" value="3" step="0.1">
+      <div class="row"><div id="BVal">3.0 T</div></div>
+    </label>
+
+    <label>Ghost horizontal distance D (m)
+      <input type="range" id="D" min="2" max="16" value="8" step="0.1">
+      <div class="row"><div id="DVal">8.0 m</div></div>
+    </label>
+
+    <label>Ghost height H (m) above Egon's firing point
+      <input type="range" id="H" min="-6" max="12" value="3" step="0.1">
+      <div class="row"><div id="HVal">3.0 m</div></div>
+    </label>
+
+    <label>Ghost radius (hit tolerance) r_g (m)
+      <input type="range" id="rg" min="0.1" max="2.0" value="0.6" step="0.05">
+      <div class="row"><div id="rgVal">0.60 m</div></div>
+    </label>
+
+    <div class="control-row">
+      <button id="stepBtn">Step</button>
+      <button id="resetBtn">Reset</button>
+      <button id="autoplayBtn">Autoplay</button>
+    </div>
+
+    <div class="status" id="status">
+      <div>Radius r: <span id="rVal">—</span></div>
+      <div>Hit: <strong id="hitVal">no</strong></div>
+      <div>Center: <span id="centerVal">—</span></div>
+    </div>
+
+    <p class="small">Notes: mass & charge are realistic elementary values but speeds and fields are scaled for visualization. B=0 => straight line. Direction of curvature follows right-hand rule for positive charges.</p>
+  </div>
+
+  <div id="canvasWrap">
+    <canvas id="c" width="900" height="560"></canvas>
+  </div>
+
+<script>
+// --- constants ---
+const me = 9.10938356e-31; // electron mass
+const mp = 1.6726219e-27; // proton mass
+const e_charge = 1.602176634e-19; // elementary charge
+
+// UI
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const particleSel = document.getElementById('particle');
+const vSlider = document.getElementById('v');
+const thetaSlider = document.getElementById('theta');
+const BSlider = document.getElementById('B');
+const DSlider = document.getElementById('D');
+const HSlider = document.getElementById('H');
+const rgSlider = document.getElementById('rg');
+const stepBtn = document.getElementById('stepBtn');
+const resetBtn = document.getElementById('resetBtn');
+const autoplayBtn = document.getElementById('autoplayBtn');
+
+const vVal = document.getElementById('vVal');
+const thetaVal = document.getElementById('thetaVal');
+const BVal = document.getElementById('BVal');
+const DVal = document.getElementById('DVal');
+const HVal = document.getElementById('HVal');
+const rgVal = document.getElementById('rgVal');
+const rVal = document.getElementById('rVal');
+const hitVal = document.getElementById('hitVal');
+const centerVal = document.getElementById('centerVal');
+
+let autoplay = false;
+
+function uiUpdate(){
+  vVal.textContent = vSlider.value;
+  thetaVal.textContent = thetaSlider.value + '°';
+  BVal.textContent = parseFloat(BSlider.value).toFixed(1) + ' T';
+  DVal.textContent = parseFloat(DSlider.value).toFixed(1) + ' m';
+  HVal.textContent = parseFloat(HSlider.value).toFixed(1) + ' m';
+  rgVal.textContent = parseFloat(rgSlider.value).toFixed(2) + ' m';
+}
+
+[vSlider, thetaSlider, BSlider, DSlider, HSlider, rgSlider, particleSel].forEach(el=>{
+  el.addEventListener('input', ()=>{ uiUpdate(); draw(); });
+});
+
+uiUpdate();
+
+// Simulation coordinate mapping
+const PIX_PER_M = 40; // scale meters to pixels
+const originX = 120; // Egon's firing point in canvas coords
+const originY = c.height/2;
+
+function toCanvas(pt){ return { x: originX + pt.x*PIX_PER_M, y: originY - pt.y*PIX_PER_M }; }
+
+function clear(){ ctx.clearRect(0,0,c.width,c.height); }
+
+function drawGrid(){ ctx.save(); ctx.strokeStyle = '#eef'; ctx.lineWidth = 1; for(let x=0;x<c.width;x+=PIX_PER_M){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,c.height); ctx.stroke(); } for(let y=0;y<c.height;y+=PIX_PER_M){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(c.width,y); ctx.stroke(); } ctx.restore(); }
+
+function draw(){
+  clear();
+  //draw axes
+  //drawGrid();
+  // read params
+  const v = parseFloat(vSlider.value); // normalized m/s unit
+  const thetaDeg = parseFloat(thetaSlider.value);
+  const theta = thetaDeg * Math.PI/180;
+  const B = parseFloat(BSlider.value); // T
+  const D = parseFloat(DSlider.value);
+  const H = parseFloat(HSlider.value);
+  const rg = parseFloat(rgSlider.value);
+  const particle = particleSel.value;
+  const q = e_charge; // positive charge magnitude
+  const m = (particle === 'positron') ? me : mp;
+
+  // convert v slider into realistic speed fraction for visualization
+  // we treat v as a tunable normalized value and use it directly in r = m*v/(q*B)
+
+  // compute radius (handle B ~ 0)
+  let r = null;
+  if(Math.abs(B) < 1e-9){ r = Infinity; }
+  else { r = Math.abs(m * v / (q * B)); }
+
+  rVal.textContent = (r===Infinity)? '∞ (straight)' : r.toExponential(3) + ' m';
+
+  // draw Egon
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(originX, originY, 8, 0, Math.PI*2); ctx.fill(); ctx.fillText('Egon', originX-18, originY+24);
+
+  // draw ghost
+  const ghost = { x: D, y: H };
+  const gc = toCanvas(ghost);
+  ctx.beginPath(); ctx.fillStyle = 'rgba(200,30,200,0.14)'; ctx.arc(gc.x, gc.y, rg*PIX_PER_M, 0, Math.PI*2); ctx.fill(); ctx.strokeStyle='#c60ca6'; ctx.beginPath(); ctx.arc(gc.x, gc.y, rg*PIX_PER_M, 0, Math.PI*2); ctx.stroke(); ctx.fillStyle='#000'; ctx.fillText('UEE', gc.x-12, gc.y- (rg*PIX_PER_M) - 8);
+
+  // draw B indicator
+  ctx.fillStyle = '#222'; ctx.fillText('B: ' + B.toFixed(2) + ' T', c.width-140, 20);
+  ctx.fillText('Particle: ' + particle, c.width-140, 36);
+
+  // compute initial velocity vector
+  const vx = v * Math.cos(theta);
+  const vy = v * Math.sin(theta);
+
+  // draw initial straight ray (if B==0)
+  if(!isFinite(r)){
+    // straight line: param t from 0..max
+    ctx.strokeStyle = '#2b7'; ctx.lineWidth = 2; ctx.beginPath(); const p0 = toCanvas({x:0,y:0}); ctx.moveTo(p0.x,p0.y);
+    // extend to canvas edge
+    const tmax = 40; for(let t=0;t<=tmax;t+=0.2){ const pt = toCanvas({x: vx*t, y: vy*t}); ctx.lineTo(pt.x, pt.y); }
+    ctx.stroke();
+
+    // intersection test with ghost
+    let hit = false;
+    for(let t=0;t<=tmax;t+=0.05){ const pt = { x: vx*t, y: vy*t }; const d2 = (pt.x-ghost.x)*(pt.x-ghost.x)+(pt.y-ghost.y)*(pt.y-ghost.y); if(d2 <= rg*rg){ hit = true; break; } }
+    hitVal.textContent = hit ? 'yes' : 'no';
+    centerVal.textContent = 'n/a';
+    return;
+  }
+
+  // compute center of circular path
+  // center = pos + s * r * (-vy/v, vx/v)  where s = -sign(q*B)
+  const s = -Math.sign(q * B);
+  const ux = -vy / v; // -vy/v
+  const uy = vx / v;  // vx/v
+  const cx = 0 + s * r * ux;
+  const cy = 0 + s * r * uy;
+
+  centerVal.textContent = '(' + cx.toFixed(3) + ', ' + cy.toFixed(3) + ') m';
+
+  // draw circle center
+  const cc = toCanvas({ x: cx, y: cy });
+  ctx.fillStyle = '#333'; ctx.beginPath(); ctx.arc(cc.x, cc.y, 4, 0, Math.PI*2); ctx.fill(); ctx.fillText('C', cc.x-10, cc.y-8);
+
+  // draw circle
+  const Cr = r * PIX_PER_M;
+  ctx.strokeStyle = 'rgba(40,140,200,0.85)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cc.x, cc.y, Cr, 0, Math.PI*2); ctx.stroke();
+
+  // compute starting angle
+  const startAngle = Math.atan2(0 - cy, 0 - cx); // angle from center to initial position
+  // angular speed magnitude:
+  const omega = Math.abs((q * B) / m);
+  // decide rotation direction: for positive qB, the motion is clockwise or ccw? We'll param with dir = sign(q*B) * -1 matching center calc
+  const dir = Math.sign(q * B) * -1; // +1 sweeps increasing angle; -1 decreasing
+
+  // draw trajectory arc until it exits bounds or completes one loop
+  ctx.strokeStyle = '#2b7'; ctx.lineWidth = 3; ctx.beginPath();
+  const samples = 2000;
+  let hit = false; let hitPoint = null; let exitPoint = null;
+  for(let i=0;i<=samples;i++){
+    const frac = i / samples;
+    // sweep angle by up to +/- 2pi (one full revolution) or less if needed
+    const angle = startAngle + dir * frac * Math.PI * 2; // full circle
+    const px = cx + r * Math.cos(angle);
+    const py = cy + r * Math.sin(angle);
+    const pc = toCanvas({x: px, y: py});
+    if(i===0) ctx.moveTo(pc.x, pc.y); else ctx.lineTo(pc.x, pc.y);
+
+    // check if out of canvas bounds
+    if(!exitPoint){ if(pc.x < -50 || pc.x > c.width+50 || pc.y < -50 || pc.y > c.height+50) exitPoint = {x:px,y:py}; }
+
+    // check hit with ghost
+    if(!hit){ const d2 = (px-ghost.x)*(px-ghost.x)+(py-ghost.y)*(py-ghost.y); if(d2 <= rg*rg){ hit = true; hitPoint = {x:px,y:py,angle:angle}; } }
+
+    // Stop searching after a hit or after leaving canvas
+    if(hit) break;
+  }
+  ctx.stroke();
+
+  // draw initial velocity arrow
+  const arrowLen = 1.0; const arrowP = toCanvas({x: vx*arrowLen, y: vy*arrowLen});
+  const p0c = toCanvas({x:0,y:0});
+  drawArrow(p0c.x, p0c.y, arrowP.x, arrowP.y);
+
+  // draw hit marker or exit marker
+  if(hit){ hitVal.textContent = 'yes'; const hc = toCanvas(hitPoint); ctx.fillStyle = '#ff3'; ctx.beginPath(); ctx.arc(hc.x,hc.y,6,0,Math.PI*2); ctx.fill(); }
+  else { hitVal.textContent = 'no'; if(exitPoint){ const ec = toCanvas(exitPoint); ctx.fillStyle='#999'; ctx.beginPath(); ctx.arc(ec.x,ec.y,6,0,Math.PI*2); ctx.fill(); } }
+}
+
+function drawArrow(x1,y1,x2,y2){ ctx.strokeStyle='#444'; ctx.fillStyle='#444'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); const ang = Math.atan2(y2-y1,x2-x1); const h = 8; ctx.beginPath(); ctx.moveTo(x2,y2); ctx.lineTo(x2 - h*Math.cos(ang-Math.PI/6), y2 - h*Math.sin(ang-Math.PI/6)); ctx.lineTo(x2 - h*Math.cos(ang+Math.PI/6), y2 - h*Math.sin(ang+Math.PI/6)); ctx.closePath(); ctx.fill(); }
+
+// buttons
+stepBtn.addEventListener('click', ()=> draw());
+resetBtn.addEventListener('click', ()=>{ thetaSlider.value = 10; BSlider.value = 3; vSlider.value = 12; DSlider.value = 8; HSlider.value = 3; rgSlider.value = 0.6; uiUpdate(); draw(); });
+autoplayBtn.addEventListener('click', ()=>{ autoplay=!autoplay; autoplayBtn.textContent = autoplay? 'Stop' : 'Autoplay'; if(autoplay) loop(); });
+
+function loop(){ if(!autoplay) return; // sweep theta slowly
+  const t = parseFloat(thetaSlider.value);
+  let nt = t + 0.5; if(nt > 89) nt = -89;
+  thetaSlider.value = nt; uiUpdate(); draw(); requestAnimationFrame(loop); }
+
+// initial draw
+draw();
+</script>
+</body>
+</html>
